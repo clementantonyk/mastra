@@ -457,6 +457,14 @@ export class MastraModelOutput<OUTPUT = undefined> extends MastraBase {
         createObjectStreamTransformer({
           structuredOutput: self.#options.structuredOutput,
           logger: self.logger,
+          model:
+            self.#model.modelId && self.#model.provider
+              ? {
+                  provider: self.#model.provider,
+                  modelId: self.#model.modelId,
+                  supportsStructuredOutputs: true,
+                }
+              : undefined,
         }),
       );
     }

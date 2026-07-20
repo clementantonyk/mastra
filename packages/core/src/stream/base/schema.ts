@@ -1,5 +1,5 @@
 import type { JSONSchema7, Schema } from '@internal/ai-sdk-v5';
-import { AnthropicSchemaCompatLayer, applyCompatLayer } from '@mastra/schema-compat';
+import { AnthropicSchemaCompatLayer, applyCompatLayer, isZodType, toStandardSchema } from '@mastra/schema-compat';
 import type { z as z3 } from 'zod/v3';
 import type { z as z4 } from 'zod/v4';
 import type { PublicSchema, StandardSchemaWithJSON } from '../../schema';
@@ -70,11 +70,74 @@ export function asJsonSchema(schema: StandardSchemaWithJSON | undefined): JSONSc
   return schema;
 }
 
-type SchemaModelInfo = {
+export type SchemaModelInfo = {
   provider: string;
   modelId: string;
   supportsStructuredOutputs: boolean;
 };
+
+/** Same compat layers as `getResponseFormat` / `getTransformedSchema` (Anthropic when model is set). */
+export function getStructuredOutputCompatLayers(model?: SchemaModelInfo): AnthropicSchemaCompatLayer[] {
+  if (!model) {
+    return [];
+  }
+  return [new AnthropicSchemaCompatLayer(model)];
+}
+
+/** JSON Schema used for final validation — matches unwrapped value shape handlers validate. */
+function structuredOutputValidationJsonSchema(
+  transformed: NonNullable<ReturnType<typeof getTransformedSchema>>,
+): JSONSchema7 {
+  if (transformed.outputFormat === 'array') {
+    const elements = transformed.jsonSchema.properties?.elements as JSONSchema7 | undefined;
+    const items = elements?.items ?? elements;
+    return { type: 'array', items: items as JSONSchema7 | JSONSchema7[] | undefined };
+  }
+
+  if (transformed.outputFormat === 'enum') {
+    const result = transformed.jsonSchema.properties?.result as JSONSchema7 | undefined;
+    if (result) {
+      return result;
+    }
+  }
+
+  return transformed.jsonSchema;
+}
+
+/**
+ * Schema used when validating parsed structured output — must match the compat-transformed
+ * JSON the model saw in `getResponseFormat`, not the author's original constraints.
+ */
+export function buildStructuredOutputValidationSchema<OUTPUT>(
+  schema: PublicSchema<OUTPUT> | undefined,
+  options?: { model?: SchemaModelInfo },
+): StandardSchemaWithJSON<OUTPUT> | undefined {
+  if (!schema) {
+    return undefined;
+  }
+
+  let resolved: unknown = schema;
+  if (typeof resolved === 'function') {
+    resolved = (resolved as () => unknown)();
+  }
+
+  const normalized = isZodType(resolved)
+    ? (toStandardSchema(resolved) as StandardSchemaWithJSON<OUTPUT>)
+    : (toStandardSchema(resolved as PublicSchema<OUTPUT>) as StandardSchemaWithJSON<OUTPUT>);
+
+  const compatLayers = getStructuredOutputCompatLayers(options?.model);
+  const compatApplies = compatLayers.some(layer => layer.shouldApply());
+
+  if (compatApplies) {
+    const transformed = getTransformedSchema(normalized, options);
+    if (transformed?.jsonSchema) {
+      const validationJson = structuredOutputValidationJsonSchema(transformed);
+      return toStandardSchema(validationJson) as StandardSchemaWithJSON<OUTPUT>;
+    }
+  }
+
+  return normalized;
+}
 
 export function getTransformedSchema<OUTPUT = undefined>(
   schema?: StandardSchemaWithJSON<OUTPUT>,
@@ -84,13 +147,15 @@ export function getTransformedSchema<OUTPUT = undefined>(
     return undefined;
   }
 
-  const jsonSchema = options?.model
-    ? (applyCompatLayer({
-        schema: schema as PublicSchema<OUTPUT>,
-        compatLayers: [new AnthropicSchemaCompatLayer(options.model)],
-        mode: 'jsonSchema',
-      }) as JSONSchema7)
-    : asJsonSchema(schema);
+  const compatLayers = getStructuredOutputCompatLayers(options?.model);
+  const jsonSchema =
+    compatLayers.length > 0
+      ? (applyCompatLayer({
+          schema: schema as PublicSchema<OUTPUT>,
+          compatLayers,
+          mode: 'jsonSchema',
+        }) as JSONSchema7)
+      : asJsonSchema(schema);
 
   if (!jsonSchema) {
     return undefined;

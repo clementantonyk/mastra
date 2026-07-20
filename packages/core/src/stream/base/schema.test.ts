@@ -18,10 +18,10 @@
 
 import { describe, it, expect } from 'vitest';
 import { z } from 'zod/v4';
-import { asJsonSchema, getResponseFormat } from './schema';
+import { asJsonSchema, getResponseFormat, buildStructuredOutputValidationSchema } from './schema';
 
 describe('getResponseFormat', () => {
-  it('applies Anthropic schema compatibility without removing local validation', async () => {
+  it('applies Anthropic schema compatibility to the LLM-facing JSON schema', async () => {
     const schema = z.object({
       score: z.number().min(0).max(1),
     });
@@ -39,12 +39,32 @@ describe('getResponseFormat', () => {
     expect(schemaJson).toContain('score');
     expect(schemaJson).not.toContain('minimum');
     expect(schemaJson).not.toContain('maximum');
+  });
+});
 
-    const validResult = await schema['~standard'].validate({ score: 0.5 });
-    expect(validResult).toEqual({ value: { score: 0.5 } });
+describe('buildStructuredOutputValidationSchema', () => {
+  it('validates with compat-transformed schema for Anthropic (not author min/max)', async () => {
+    const schema = z.object({
+      score: z.number().min(0).max(1),
+    });
 
-    const invalidResult = await schema['~standard'].validate({ score: 1.2 });
-    expect('issues' in invalidResult).toBe(true);
+    const model = {
+      provider: 'anthropic',
+      modelId: 'claude-3.5-haiku-20241022',
+      supportsStructuredOutputs: true,
+    };
+
+    const validationSchema = buildStructuredOutputValidationSchema(schema, { model });
+    expect(validationSchema).toBeDefined();
+
+    const withinAuthorBounds = await validationSchema!['~standard'].validate({ score: 0.5 });
+    expect(withinAuthorBounds).toEqual({ value: { score: 0.5 } });
+
+    const outsideAuthorBounds = await validationSchema!['~standard'].validate({ score: 1.2 });
+    expect('issues' in outsideAuthorBounds).toBe(false);
+
+    const authorResult = await schema['~standard'].validate({ score: 1.2 });
+    expect('issues' in authorResult).toBe(true);
   });
 });
 
